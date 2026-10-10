@@ -137,6 +137,14 @@ npx wrangler deploy
 
 更新成功后，在 Telegram 中关闭再开启代理，重建 Bridge 和会话。
 
+## 性能与稳定性
+
+- AES-CTR 优先使用 WebCrypto 原生处理，减少逐字节 JavaScript 运算。
+- 同一连接已排队的小包合并处理，不额外等待凑包，保持顺序和流控。
+- Bridge 发送拥堵时短暂等待，保留队列硬上限，连续 30 秒无进展则关闭，避免无限积压。
+
+这些优化不需要新增变量，也不改变 TCP 直连和 Durable Object 架构；实际延迟仍取决于网络链路。
+
 ## 本地开发
 
 ```bash

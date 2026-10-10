@@ -8,6 +8,8 @@ export const LIMITS = Object.freeze({
   ingressItems: 128,
   uplinkBytes: 8 * 1024 * 1024,
   uplinkItems: 8192,
+  uplinkBatchBytes: DATA_CHUNK,
+  uplinkBatchItems: 64,
   streamBytes: INITIAL_WINDOW + 1024 * 1024,
   streamItems: 4096,
   downlinkBytes: 8 * 1024 * 1024,
@@ -184,10 +186,28 @@ export class RelaySession {
   async drainStream(stream) {
     try {
       while (!stream.closed && !this.closed && stream.queueHead < stream.queue.length) {
-        const item = stream.queue[stream.queueHead];
+        const items = [stream.queue[stream.queueHead]];
         stream.queue[stream.queueHead++] = null;
-        try { await this.writeStream(stream, item.payload); }
-        finally { this.releaseWrite(stream, item); }
+        let length = items[0].payload.length;
+        // Drain only data already queued on this stream; never wait to fill a batch.
+        while (stream.queueHead < stream.queue.length && items.length < LIMITS.uplinkBatchItems) {
+          const next = stream.queue[stream.queueHead];
+          if (length + next.payload.length > LIMITS.uplinkBatchBytes) break;
+          items.push(next); length += next.payload.length;
+          stream.queue[stream.queueHead++] = null;
+        }
+        try {
+          let payload = items[0].payload;
+          if (items.length > 1) {
+            payload = new Uint8Array(length);
+            let offset = 0;
+            for (const item of items) { payload.set(item.payload, offset); offset += item.payload.length; }
+          }
+          await this.writeStream(stream, payload);
+        } finally {
+          // Keep every item's admission cost charged through I/O and cancellation.
+          for (const item of items) this.releaseWrite(stream, item);
+        }
         if (stream.queueHead === stream.queue.length) { stream.queue = []; stream.queueHead = 0; }
         else if (stream.queueHead >= 64) { stream.queue = stream.queue.slice(stream.queueHead); stream.queueHead = 0; }
       }

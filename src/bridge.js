@@ -2,7 +2,7 @@ import { MAX_WS_MESSAGE } from "./protocol.js";
 
 export function bridgePage(host, bootstrap) {
   const scriptNonce = randomNonce();
-  const config = JSON.stringify({ origin: `https://${host}`, bootstrap, batchLimit: MAX_WS_MESSAGE, maxPendingItems: 1024, connectTimeout: 15000 });
+  const config = JSON.stringify({ origin: `https://${host}`, bootstrap, batchLimit: MAX_WS_MESSAGE, maxPendingItems: 1024, connectTimeout: 15000, sendHighWater: 512 * 1024, sendRetry: 10, writeTimeout: 30000 });
   const html = `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Web Proxy</title></head>
 <body><main><h1>Connection bridge</h1><p>This page is opened by a compatible Telegram client.</p></main>
@@ -10,7 +10,7 @@ export function bridgePage(host, bootstrap) {
 (()=>{'use strict';
 const cfg=${config};
 let port=null, sessionToken='', socket=null, creating=false, closed=false;
-const pending=[]; let pendingBytes=0;
+const pending=[]; let pendingHead=0,pendingBytes=0,sendTimer=null,stalledAt=null,lastBuffered=0;
 const bootstrapAbort=new AbortController(); let connectTimer=null;
 const fragment=new URLSearchParams(location.hash.slice(1));
 const nonce=fragment.get('android')||'';
@@ -46,11 +46,32 @@ function openSocket(){
  socket=new WebSocket(target,'tproxy-v1.'+sessionToken); socket.binaryType='arraybuffer';
  socket.onopen=()=>{
   if(closed)return; clearTimeout(connectTimer);connectTimer=null;status('connected');
-  try{for(const data of pending){if(socket.bufferedAmount+data.byteLength>cfg.batchLimit)return fail();socket.send(data)}}catch{return fail()}
-  pending.length=0;pendingBytes=0;
+  pump();
  };
  socket.onmessage=e=>{if(closed)return;if(!(e.data instanceof ArrayBuffer)||!e.data.byteLength||e.data.byteLength>cfg.batchLimit)return fail();try{sendToApp(e.data)}catch{return fail()}};
  socket.onerror=()=>{}; socket.onclose=()=>{if(!closed)fail()};
+}
+// Bound the application queue separately from the browser's send buffer.
+// Pause on congestion instead of dropping an otherwise healthy carrier.
+function pump(){
+ clearTimeout(sendTimer);sendTimer=null;
+ if(closed||!socket||socket.readyState!==WebSocket.OPEN)return;
+ while(pendingHead<pending.length){
+  const data=pending[pendingHead],buffered=socket.bufferedAmount;
+  if(buffered>cfg.batchLimit)return fail();
+  // One valid large message may exceed the soft watermark on an empty socket.
+  if(buffered>0&&buffered+data.byteLength>cfg.sendHighWater){
+   const now=performance.now();
+   if(stalledAt===null||buffered<lastBuffered)stalledAt=now;
+   lastBuffered=buffered;
+   if(now-stalledAt>=cfg.writeTimeout)return fail();
+   sendTimer=setTimeout(pump,cfg.sendRetry);return;
+  }
+  try{socket.send(data)}catch{return fail()}
+  pending[pendingHead++]=null;pendingBytes-=data.byteLength;stalledAt=null;lastBuffered=0;
+  if(pendingHead===pending.length){pending.length=0;pendingHead=0}
+  else if(pendingHead>=64){pending.splice(0,pendingHead);pendingHead=0}
+ }
 }
 function fromApp(data){
  if(closed)return;
@@ -58,9 +79,8 @@ function fromApp(data){
   if(!data.byteLength||data.byteLength>cfg.batchLimit)return fail();
   try{splitFrames(data)}catch{return fail()}
   if(!creating){creating=true;connectTimer=setTimeout(fail,cfg.connectTimeout);createSession(data);return}
-  if(!sessionToken||!socket||socket.readyState!==WebSocket.OPEN){if(pending.length>=cfg.maxPendingItems||pendingBytes+data.byteLength>cfg.batchLimit)return fail();pending.push(data);pendingBytes+=data.byteLength;return}
-  if(socket.bufferedAmount+data.byteLength>cfg.batchLimit)return fail();
-  try{socket.send(data)}catch{fail()}
+  if(pending.length-pendingHead>=cfg.maxPendingItems||pendingBytes+data.byteLength>cfg.batchLimit)return fail();
+  pending.push(data);pendingBytes+=data.byteLength;pump();
  }else if(data&&data.t==='close')close(true);
 }
 function activate(next){port=next;port.onmessage=e=>fromApp(e.data);port.start&&port.start();status('connecting')}
@@ -78,7 +98,7 @@ addEventListener('message',e=>{
  try{const u=new URL(e.origin);if(u.protocol!=='http:'||u.hostname!=='127.0.0.1'||!u.port)return}catch{return}
  activate(e.ports[0]);
 });
-function close(notify){if(closed)return;closed=true;clearTimeout(connectTimer);connectTimer=null;bootstrapAbort.abort();pending.length=0;pendingBytes=0;try{socket&&socket.close()}catch{}if(notify&&sessionToken)fetch(cfg.origin+'/api/v1/session',{method:'DELETE',headers:{Authorization:'Bearer '+sessionToken},keepalive:true,mode:'same-origin',redirect:'error',cache:'no-store',credentials:'omit',referrerPolicy:'no-referrer'}).catch(()=>{});try{port&&port.close()}catch{}}
+function close(notify){if(closed)return;closed=true;clearTimeout(connectTimer);connectTimer=null;clearTimeout(sendTimer);sendTimer=null;bootstrapAbort.abort();pending.length=0;pendingHead=0;pendingBytes=0;stalledAt=null;try{socket&&socket.close()}catch{}if(notify&&sessionToken)fetch(cfg.origin+'/api/v1/session',{method:'DELETE',headers:{Authorization:'Bearer '+sessionToken},keepalive:true,mode:'same-origin',redirect:'error',cache:'no-store',credentials:'omit',referrerPolicy:'no-referrer'}).catch(()=>{});try{port&&port.close()}catch{}}
 addEventListener('pagehide',()=>close(true),{once:true});
 })();
 </script></body></html>`;

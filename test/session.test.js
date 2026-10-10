@@ -84,7 +84,7 @@ test("same-stream writes remain FIFO and consume credit at admission", async t =
   const gate = deferred(), seen = [];
   t.after(() => gate.resolve());
   class Session extends RelaySession {
-    async writeStream(stream, payload) { if (!seen.length) await gate.promise; seen.push(payload[0]); this.grantWindow(stream, payload.length); }
+    async writeStream(stream, payload) { if (!seen.length) await gate.promise; seen.push(...payload); this.grantWindow(stream, payload.length); }
   }
   const { session } = fixture(t, undefined, Session);
   await session.enqueueMessage(message(open(1), data(1, [1]), data(1, [2]), data(1, [3])));
@@ -163,7 +163,7 @@ test("real handshake, fragmented uplink and downlink preserve encryption and WIN
   const plaintext = new TextEncoder().encode("test payload across chunks"), ciphertext = await client.tx.crypt(plaintext);
   await session.enqueueMessage(message(open(1), encodeFrame(FRAME.DATA, 1, client.wire.subarray(0, 17))));
   await session.enqueueMessage(message(encodeFrame(FRAME.DATA, 1, client.wire.subarray(17)), encodeFrame(FRAME.DATA, 1, ciphertext.subarray(0, 5)), encodeFrame(FRAME.DATA, 1, ciphertext.subarray(5))));
-  await until(() => session.uplinkItems === 0 && upstream.writes.length === 3);
+  await until(() => session.uplinkItems === 0 && upstream.writes.length === 2);
   const wire = upstream.writes[0], material = wire.subarray(8, 56), rev = new Uint8Array(material).reverse();
   const dcDecrypt = new AesCtrStream(material.subarray(0, 32), material.subarray(32));
   const decodedHeader = await dcDecrypt.crypt(wire);
@@ -288,4 +288,81 @@ test("session shutdown releases downlink waiters and deletes initialization stat
   session.shutdown(); assert.equal(await waiting, false);
   assert.equal(stored.has("expiresAt"), false); assert.equal(session.downlinkWaiters.size, 0);
   assert.equal((await session.fetch(new Request("https://session/internal/init", { method: "POST" }))).status, 404);
+});
+
+test("uplink coalesces only queued same-stream data with bounded item batches", async t => {
+  const gate = deferred(), batches = [];
+  t.after(() => gate.resolve());
+  class Session extends RelaySession {
+    async writeStream(stream, payload) {
+      batches.push([...payload]);
+      if (batches.length === 1) await gate.promise;
+      this.grantWindow(stream, payload.length);
+    }
+  }
+  const { session, sent } = fixture(t, undefined, Session);
+  session.openStream({ streamId: 1, payload: new Uint8Array() });
+  for (let i = 0; i < 131; i++) session.queueWrite({ streamId: 1, payload: new Uint8Array([i]) });
+  assert.deepEqual(batches, [[0]], "first item must start without a batching timer");
+  gate.resolve(); await until(() => session.uplinkItems === 0);
+  assert.deepEqual(batches.map(b => b.length), [1, 64, 64, 2]);
+  assert.deepEqual(batches.flat(), Array.from({ length: 131 }, (_, i) => i));
+  assert.equal(session.uplinkBytes, 0); assert.equal(session.streams.get(1).pendingBytes, 0);
+  const grants = sent.filter(f => f.type === FRAME.WINDOW).reduce((n, f) => n + new DataView(f.payload.buffer, f.payload.byteOffset, 4).getUint32(0), 0);
+  assert.equal(grants, 131); assert.equal(session.streams.get(1).receiveWindow, INITIAL_WINDOW);
+});
+test("uplink coalescing respects the byte limit without mixing streams", async t => {
+  const gate = deferred(), batches = [];
+  t.after(() => gate.resolve());
+  class Session extends RelaySession {
+    async writeStream(stream, payload) {
+      batches.push({ id: stream.id, bytes: payload.length });
+      if (batches.length === 1) await gate.promise;
+      this.grantWindow(stream, payload.length);
+    }
+  }
+  const { session } = fixture(t, undefined, Session);
+  for (const id of [1, 2]) session.openStream({ streamId: id, payload: new Uint8Array() });
+  session.queueWrite({ streamId: 1, payload: new Uint8Array([1]) });
+  for (const size of [32768, 32768, 1]) session.queueWrite({ streamId: 1, payload: new Uint8Array(size) });
+  session.queueWrite({ streamId: 2, payload: new Uint8Array([2]) });
+  await until(() => session.streams.get(2).pendingItems === 0);
+  gate.resolve(); await until(() => session.uplinkItems === 0);
+  assert.deepEqual(batches, [{ id: 1, bytes: 1 }, { id: 2, bytes: 1 }, { id: 1, bytes: 65536 }, { id: 1, bytes: 1 }]);
+  assert.equal(session.uplinkBytes, 0);
+});
+test("closing a stream releases queued and in-flight batch accounting exactly once", async t => {
+  const first = deferred(), batch = deferred(); let calls = 0;
+  t.after(() => { first.resolve(); batch.resolve(); });
+  class Session extends RelaySession {
+    async writeStream(stream, payload) {
+      if (++calls === 1) await first.promise; else await batch.promise;
+      if (!stream.closed) this.grantWindow(stream, payload.length);
+    }
+  }
+  const { session } = fixture(t, undefined, Session);
+  session.openStream({ streamId: 1, payload: new Uint8Array() });
+  const stream = session.streams.get(1);
+  for (let i = 0; i < 132; i++) session.queueWrite({ streamId: 1, payload: new Uint8Array([1]) });
+  first.resolve(); await until(() => calls === 2);
+  session.closeStream(1, true);
+  assert.equal(session.uplinkItems, LIMITS.uplinkBatchItems);
+  batch.resolve(); await until(() => session.uplinkItems === 0);
+  assert.equal(session.uplinkBytes, 0); assert.equal(stream.pendingItems, 0); assert.equal(stream.pendingBytes, 0);
+});
+test("failed coalesced writes release the batch and close only its stream", async t => {
+  const gate = deferred(); let calls = 0;
+  t.after(() => gate.resolve());
+  class Session extends RelaySession {
+    async writeStream(stream, payload) {
+      if (++calls === 1) { await gate.promise; this.grantWindow(stream, payload.length); }
+      else throw Error("synthetic write failure");
+    }
+  }
+  const { session } = fixture(t, undefined, Session);
+  for (const id of [1, 2]) session.openStream({ streamId: id, payload: new Uint8Array() });
+  for (let i = 0; i < 100; i++) session.queueWrite({ streamId: 1, payload: new Uint8Array([1]) });
+  gate.resolve(); await until(() => !session.streams.has(1));
+  assert.equal(session.uplinkItems, 0); assert.equal(session.uplinkBytes, 0);
+  assert.equal(session.closed, false); assert.equal(session.streams.has(2), true);
 });

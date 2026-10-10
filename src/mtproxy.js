@@ -10,6 +10,13 @@ export class AesCtrStream {
   }
   async crypt(input) {
     const src = input instanceof Uint8Array ? input : new Uint8Array(input);
+    // Most relay chunks are block-aligned: let WebCrypto handle the XOR too.
+    if (!this.spare.length && src.length && src.length % 16 === 0) {
+      const key = await this.keyPromise;
+      const out = new Uint8Array(await crypto.subtle.encrypt({name:"AES-CTR",counter:this.counter,length:128}, key, src));
+      addBlocks(this.counter, src.length / 16);
+      return out;
+    }
     const out = new Uint8Array(src.length); let pos = 0;
     if (this.spare.length) {
       const n = Math.min(this.spare.length, src.length);
@@ -18,12 +25,16 @@ export class AesCtrStream {
     }
     if (pos < src.length) {
       const need = src.length - pos, blocks = Math.ceil(need / 16);
-      const zeros = new Uint8Array(blocks * 16);
+      // Zero padding exposes only the unused keystream tail for the next call.
+      // Actual payload bytes are transformed natively, not in a JS byte loop.
+      const padded = new Uint8Array(blocks * 16);
+      padded.set(src.subarray(pos));
       const key = await this.keyPromise;
-      const ks = new Uint8Array(await crypto.subtle.encrypt({name:"AES-CTR",counter:this.counter,length:128}, key, zeros));
+      const encrypted = new Uint8Array(await crypto.subtle.encrypt({name:"AES-CTR",counter:this.counter,length:128}, key, padded));
       addBlocks(this.counter, blocks);
-      for (let i=0;i<need;i++) out[pos+i] = src[pos+i] ^ ks[i];
-      if (need < ks.length) this.spare = ks.subarray(need);
+      out.set(encrypted.subarray(0, need), pos);
+      // Copy at most 15 bytes instead of retaining the whole encrypted buffer.
+      if (need < encrypted.length) this.spare = encrypted.slice(need);
     }
     return out;
   }

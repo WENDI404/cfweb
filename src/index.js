@@ -2,6 +2,7 @@ import { connect } from "cloudflare:sockets";
 import { RelaySession } from "./session.js";
 import { FRAME, encodeFrame, parseFrames, clampInt } from "./protocol.js";
 import { bridgePage } from "./bridge.js";
+import { hmac } from "./auth.js";
 
 export default {
   async fetch(request, env) {
@@ -137,11 +138,6 @@ function signingKey(env) {
   // Domain separation lets one user-supplied proxy secret safely serve both
   // MTProxy authentication and short-lived bootstrap-token signing.
   return new TextEncoder().encode(`cf-webproxy/session-signing/v1\n${String(env.PROXY_SECRET || "")}`);
-}
-
-async function hmac(keyBytes, data) {
-  const key = await crypto.subtle.importKey("raw", keyBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  return new Uint8Array(await crypto.subtle.sign("HMAC", key, data));
 }
 
 // Keep the opaque 43-character wire format, but reject fabricated credentials

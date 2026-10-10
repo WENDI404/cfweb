@@ -107,6 +107,8 @@ https://t.me/webproxy?server=你的域名&secret=你的PROXY_SECRET
 
 除 `PROXY_SECRET` 外均为可选环境变量。会话签名密钥由代理密钥派生，**无需配置 `SESSION_SIGNING_KEY`**。
 
+创建后 10 分钟内未接入 WebSocket 的会话会过期并自动清理；此期限不会中断已建立的正常连接。
+
 ## 4. 验证与排障
 
 访问 `https://你的域名/healthz`，正常应返回：

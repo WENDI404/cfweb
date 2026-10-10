@@ -18,7 +18,7 @@ function fixture() {
   return { env, calls };
 }
 async function bootstrap(env, host = HOST) {
-  const key = await crypto.subtle.importKey("raw", new Uint8Array(16).fill(0x12), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const key = await crypto.subtle.importKey("raw", new Uint8Array(Buffer.from(env.PROXY_SECRET, "hex")), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   const mac = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode("tdesktop-web-proxy-bridge-v1\n" + host));
   const capability = Buffer.from(mac).toString("base64url");
   const response = await worker.fetch(new Request("https://" + host + "/?bridge=" + capability), env);
@@ -65,4 +65,20 @@ test("PUBLIC_HOSTNAME and health endpoint retain existing behavior", async () =>
   const wrong = await worker.fetch(new Request("https://other.example/healthz"), env); assert.equal(wrong.status, 404);
   const health = await worker.fetch(new Request("https://" + HOST + "/healthz"), env);
   assert.deepEqual(await health.json(), { ok: true, carrier: "websocket", relay: "direct-telegram-dc" });
+});
+
+test("rotating PROXY_SECRET rejects old credentials even with warm cached keys", async () => {
+  const { env, calls } = fixture();
+  const oldBootstrap = await bootstrap(env);
+  const oldSession = (await create(env)).headers.get("X-Session-Token");
+  env.PROXY_SECRET = "34".repeat(16);
+  const before = calls.length;
+  const ws = await worker.fetch(new Request("https://" + HOST + "/api/v1/ws", { headers: { Upgrade: "websocket", "Sec-WebSocket-Protocol": "tproxy-v1." + oldSession } }), env);
+  assert.equal(ws.status, 404);
+  const post = await worker.fetch(new Request("https://" + HOST + "/api/v1/session", { method: "POST", headers: { Authorization: "Bearer " + oldBootstrap, "Content-Type": "application/octet-stream" }, body: encodeFrame(FRAME.HELLO, 0, new Uint8Array([1])) }), env);
+  assert.equal(post.status, 404); assert.equal(calls.length, before);
+  const fresh = await create(env); assert.equal(fresh.status, 200);
+  const token = fresh.headers.get("X-Session-Token");
+  const accepted = await worker.fetch(new Request("https://" + HOST + "/api/v1/ws", { headers: { Upgrade: "websocket", "Sec-WebSocket-Protocol": "tproxy-v1." + token } }), env);
+  assert.equal(accepted.status, 204); assert.equal(calls.at(-1).token, token);
 });

@@ -14,6 +14,7 @@ export const LIMITS = Object.freeze({
   streamItems: 4096,
   downlinkBytes: 8 * 1024 * 1024,
   downlinkItems: 8192,
+  sessionConnectTimeout: 10 * 60 * 1000,
   handshakeTimeout: 15000,
   connectTimeout: 10000,
   writeTimeout: 30000,
@@ -55,22 +56,39 @@ export class RelaySession {
     if (this.closed) return new Response("session closed", { status: 404 });
     if (url.pathname === "/internal/init" && request.method === "POST") {
       if (!this.initialized) {
-        await this.ctx.storage.put({ expiresAt: Date.now() + 10 * 60 * 1000 });
+        // Keep initialization and expiry scheduling atomic, including after eviction.
+        const expiresAt = await this.ctx.storage.transaction(async (storage) => {
+          const saved = await storage.get("expiresAt");
+          const deadline = saved ?? Date.now() + LIMITS.sessionConnectTimeout;
+          if (!Number.isSafeInteger(deadline) || deadline <= Date.now()) return null;
+          await storage.put({ expiresAt: deadline });
+          await storage.setAlarm(deadline);
+          return deadline;
+        });
+        if (this.closed || expiresAt === null) {
+          this.shutdown("session_connect_expired");
+          return new Response("session expired", { status: 404 });
+        }
         this.initialized = true;
       }
       return new Response(null, { status: 204 });
     }
     if (url.pathname === "/internal/ws" && request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
-      if (!this.initialized) {
-        const expiresAt = await this.ctx.storage.get("expiresAt");
-        if (this.closed || !expiresAt || expiresAt < Date.now()) return new Response("unknown session", { status: 404 });
-        this.initialized = true;
-      }
+      // The deadline applies to first attachment, never to a healthy live socket.
       if (this.ws) return new Response("already connected", { status: 409 });
+      const expiresAt = await this.ctx.storage.get("expiresAt");
+      if (this.closed) return new Response("session closed", { status: 404 });
+      if (this.ws) return new Response("already connected", { status: 409 });
+      if (!Number.isSafeInteger(expiresAt) || expiresAt <= Date.now()) {
+        this.shutdown("session_connect_expired");
+        return new Response("unknown session", { status: 404 });
+      }
+      this.initialized = true;
       const pair = new WebSocketPair();
       const client = pair[0], server = pair[1];
       server.accept();
       this.ws = server;
+      this.ctx.waitUntil(this.ctx.storage.deleteAlarm().catch(() => {}));
       this.trace("websocket_accepted");
       server.addEventListener("message", (event) => this.enqueueMessage(event.data));
       server.addEventListener("close", (event) => {
@@ -87,6 +105,27 @@ export class RelaySession {
       return new Response(null, { status: 204 });
     }
     return new Response("not found", { status: 404 });
+  }
+
+  async alarm() {
+    // An alarm already queued when attachment cancels it must not close a live session.
+    if (this.ws && !this.closed) return;
+    const expiresAt = await this.ctx.storage.get("expiresAt");
+    if (this.ws && !this.closed) return;
+    if (!this.closed && Number.isSafeInteger(expiresAt) && expiresAt > Date.now()) {
+      await this.ctx.storage.setAlarm(expiresAt);
+      return;
+    }
+    this.shutdown("session_connect_expired", false);
+    // Propagate failures so Cloudflare can retry the alarm's cleanup.
+    await this.clearSessionState();
+  }
+
+  async clearSessionState() {
+    await this.ctx.storage.transaction(async (storage) => {
+      await storage.delete("expiresAt");
+      await storage.deleteAlarm();
+    });
   }
 
   enqueueMessage(data) {
@@ -391,7 +430,7 @@ export class RelaySession {
     this.shutdown(reason);
   }
 
-  shutdown(reason = "shutdown") {
+  shutdown(reason = "shutdown", cleanup = true) {
     if (this.closed) return;
     this.trace("session_shutdown", { reason, streams: this.streams.size });
     this.closed = true;
@@ -400,7 +439,7 @@ export class RelaySession {
     try { this.ws?.close(1000, "session closed"); } catch {}
     this.ws = null;
     // Do not let a later isolate resurrect a deleted/failed session.
-    this.ctx.waitUntil(Promise.resolve(this.ctx.storage.delete("expiresAt")).catch(() => {}));
+    if (cleanup) this.ctx.waitUntil(this.clearSessionState().catch(() => {}));
   }
 }
 

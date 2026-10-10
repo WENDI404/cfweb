@@ -20,6 +20,7 @@ function fixture(t, connect = () => { throw Error("unexpected dial"); }, Session
   const ctx = { waitUntil(p) { tasks.push(p); }, storage: {
     async put(values) { for (const [k, v] of Object.entries(values)) stored.set(k, v); },
     async get(k) { return stored.get(k); }, async delete(k) { return stored.delete(k); },
+    async setAlarm() {}, async deleteAlarm() {}, async transaction(fn) { return fn(this); },
   } };
   const session = new Session(ctx, { PROXY_SECRET: SECRET }, connect);
   session.ws = { readyState: 1, send(data) { sent.push(...parseFrames(data)); }, close() {} };

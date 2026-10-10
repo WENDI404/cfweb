@@ -131,6 +131,7 @@ https://t.me/webproxy?server=你的域名&secret=你的PROXY_SECRET
 ## 更新与开发
 
 - **GitHub 自动部署**：Fork 用户先同步上游；已连接 Workers Builds 的生产分支更新后会触发部署。
+- **确认更新生效**：在 Worker 的 Deployments 页面核对提交 ID 和部署结果；GitHub 推送成功不代表 Cloudflare 已部署成功。
 - **命令行更新**：
 
 ```bash

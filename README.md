@@ -16,12 +16,10 @@ Telegram Android → HTTPS / WebSocket → Workers 或 Pages → Telegram DC:443
 
 | 配置 | 值 |
 |---|---|
-| 生产分支 | `main` |
-| 框架预设 | `None` |
 | 根目录 | `pages` |
 | 构建命令 | `npm run build` |
-| 输出目录 | `dist` |
-| `NODE_VERSION` | `22` |
+
+生产分支确认是 `main`，框架保持 `None`。输出目录由配置文件指定；若创建页面要求填写，填 `dist`。**Node 版本已在仓库指定，无需添加 `NODE_VERSION`。** 这些设置只需在首次创建时确认，后续更新不用重填。
 
 在 Pages 生产环境添加加密变量 `PROXY_SECRET`，重新部署使其生效。**不需要额外 Worker、Durable Object 或部署命令。**
 

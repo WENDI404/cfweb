@@ -6,18 +6,21 @@
 
 在 Cloudflare 控制台进入 **Workers & Pages → 创建应用 → Pages → 连接 Git / 导入现有 Git 存储库**，选择本仓库（或你的 Fork）。界面名称可能有所不同，确认创建的是 **Pages 项目**。
 
-填写以下构建配置：
+**首次创建主要填写下面两项：**
 
 | 配置 | 值 |
 |---|---|
-| 生产分支 / Production branch | `main` |
-| 框架预设 / Framework preset | `None`（无） |
 | 根目录 / Root directory | `pages` |
 | 构建命令 / Build command | `npm run build` |
-| 构建输出目录 / Build output directory | `dist` |
-| 环境变量 `NODE_VERSION` | `22` |
 
-**输出目录相对于 `pages`，不要填成 `pages/dist`。不需要填写 Deploy command，也不要使用 `wrangler deploy`。** 如果页面要求 Workers 的部署命令，说明进入了 Workers 创建流程，请切换到 Pages。
+其余设置：
+
+- 生产分支确认是 `main`，框架预设保持 `None`（无）。
+- 输出目录已在 `wrangler.toml` 中设为 `dist`；**如果创建页面仍要求填写，就填 `dist`**，不要填 `pages/dist`。
+- Node 版本由仓库的 `.node-version` 指定，**不用再添加 `NODE_VERSION`**。若之前手动设置过旧版本，请删除该覆盖项，或改为 `22`。
+- 不需要 Deploy command，也不要使用 `wrangler deploy`。如果页面要求 Workers 的部署命令，请切换到 Pages 创建流程。
+
+这些是首次设置，不是每次更新都要重填。当前仓库同时支持 Workers 和 Pages，**根目录与构建命令不能全部留空**。
 
 构建时会自动安装依赖，生成 `_worker.js`、路由配置和静态占位页。无须把生成的 `dist` 提交到 GitHub。构建需要仓库内的 `src`，不要只复制 `pages` 文件夹到另一个仓库。
 

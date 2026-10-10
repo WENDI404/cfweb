@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "test": "node --test"
+    "test": "node --test",
+    "test:pages": "npm run build --prefix pages && node pages/smoke.mjs"
   },
   "devDependencies": {
     "wrangler": "^4.37.0"

@@ -1,18 +1,37 @@
 # cf-webproxy
 
-轻量的 Telegram WEB Proxy，基于 **Cloudflare Workers + Durable Objects**，直连 Telegram 数据中心。**无需 VPS、后端 MTProxy 或管理面板，只需配置一个 `PROXY_SECRET`。**
+轻量的 Telegram WEB Proxy，支持 **Workers + Durable Objects** 和 **独立 Pages** 两种部署方式，直连 Telegram 数据中心。**无需 VPS、后端 MTProxy 或管理面板，只需配置一个 `PROXY_SECRET`。**
 
 ```text
-Telegram Android → HTTPS / WebSocket → Worker + Durable Object → Telegram DC:443
+Telegram Android → HTTPS / WebSocket → Workers 或 Pages → Telegram DC:443
 ```
 
 支持多路复用、流控与超时清理；使用 WebCrypto 原生加密、已排队小包合并及有界背压等待。仅允许连接预设的 Telegram DC，不接受任意 TCP 目标。
 
 ## 1. 部署到 Cloudflare
 
-> 请选择 **Workers，不是 Pages**。仓库已配置入口、Durable Object 绑定和迁移，无需填写 `dist` 输出目录。
+### Pages：直接连接 Git 仓库
 
-### 一键部署（推荐）
+在 Cloudflare 创建 **Pages** 项目，连接本仓库或你的 Fork：
+
+| 配置 | 值 |
+|---|---|
+| 生产分支 | `main` |
+| 框架预设 | `None` |
+| 根目录 | `pages` |
+| 构建命令 | `npm run build` |
+| 输出目录 | `dist` |
+| `NODE_VERSION` | `22` |
+
+在 Pages 生产环境添加加密变量 `PROXY_SECRET`，重新部署使其生效。**不需要额外 Worker、Durable Object 或部署命令。**
+
+完整步骤与会话差异见 **[Pages 部署说明](./pages/README.md)**。Pages 版使用 60 秒接入票据，不支持跨请求 HTTP DELETE 撤销；已连接的 WebSocket 不受这个期限影响。
+
+### Workers：保留原有部署方式
+
+以下按钮及命令仅用于 **Workers + Durable Objects**，不用于 Pages；仓库根目录已配置绑定和迁移，无需填写输出目录。
+
+#### Workers 一键部署
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/coldboy404/cf-webproxy)
 
@@ -30,7 +49,7 @@ Workers & Pages → 你的 Worker → Settings → Variables and Secrets → Add
 
 密钥要求：**32 位小写十六进制字符（0–9、a–f）**，也支持 `dd` 前缀加 32 位（共 34 位）；不支持 `ee` / FakeTLS。请使用自己的密钥，不要照抄他人的代理链接。
 
-### 其他部署方式
+#### Workers 其他部署方式
 
 <details>
 <summary>Fork 后导入 GitHub 仓库</summary>
@@ -71,7 +90,7 @@ Windows PowerShell 若提示禁止运行 `npx.ps1`，将 `npx` / `npm` 替换为
 
 </details>
 
-### 自定义域名（可选）
+#### Workers 自定义域名（可选）
 
 如果 `workers.dev` 访问不稳定，可使用托管在 Cloudflare 的自定义域名：
 
@@ -89,7 +108,7 @@ Windows PowerShell 若提示禁止运行 `npx.ps1`，将 `npx` / `npm` 替换为
 https://t.me/webproxy?server=你的域名&secret=你的PROXY_SECRET
 ```
 
-- `server`：Worker 地址或自定义域名，**不含 `https://` 或路径**。
+- `server`：Worker / Pages 地址或自定义域名，**不含 `https://` 或路径**。
 - `secret`：与 Cloudflare 配置完全一致，包括可选的 `dd` 前缀。
 - 添加后实际测试消息收发；域名能 Ping 通或浏览器能打开，不代表代理可用。
 
@@ -107,7 +126,7 @@ https://t.me/webproxy?server=你的域名&secret=你的PROXY_SECRET
 
 除 `PROXY_SECRET` 外均为可选环境变量。会话签名密钥由代理密钥派生，**无需配置 `SESSION_SIGNING_KEY`**。
 
-创建后 10 分钟内未接入 WebSocket 的会话会过期并自动清理；此期限不会中断已建立的正常连接。
+**Workers 版**创建后 10 分钟内未接入 WebSocket 的会话会过期并自动清理；**Pages 版**接入票据有效期为 60 秒。两者都不会因接入期限结束而中断已建立的正常连接。
 
 ## 4. 验证与排障
 
@@ -122,17 +141,17 @@ https://t.me/webproxy?server=你的域名&secret=你的PROXY_SECRET
 | 问题 | 检查方法 |
 |---|---|
 | Telegram 无法连接 | 确认密钥已部署生效，并与链接一致；确认客户端支持 WEB Proxy。 |
-| 换域名后不通 | 确认域名绑定到正确 Worker、证书已就绪；若设置了 `PUBLIC_HOSTNAME`，需与入口一致。 |
-| 仍无法定位 | 临时开启 `DIAGNOSTICS=1`，查看 Worker 日志，并在 Telegram 中重新连接。 |
+| 换域名后不通 | 确认域名绑定到正确 Worker / Pages 项目、证书已就绪；若设置了 `PUBLIC_HOSTNAME`，需与入口一致。 |
+| 仍无法定位 | 临时开启 `DIAGNOSTICS=1`，查看对应 Worker / Pages Functions 日志，并在 Telegram 中重新连接。 |
 | 能连接但延迟偏高 | 分别测试移动网络和宽带。TG 延迟包含 Worker / Durable Object 调度及到 Telegram DC 的链路耗时，不等同于域名 Ping。 |
 
 不要公开真实密钥、会话 Token 或完整 Bridge URL。代码优化不能保证特定网络延迟。
 
 ## 更新与开发
 
-- **GitHub 自动部署**：Fork 用户先同步上游；已连接 Workers Builds 的生产分支更新后会触发部署。
-- **确认更新生效**：在 Worker 的 Deployments 页面核对提交 ID 和部署结果；GitHub 推送成功不代表 Cloudflare 已部署成功。
-- **命令行更新**：
+- **GitHub 自动部署**：Fork 用户先同步上游；已连接 Workers Builds 或 Pages Git 的生产分支更新后会触发对应部署。
+- **确认更新生效**：在对应 Worker / Pages 项目的 Deployments 页面核对提交 ID 和部署结果；GitHub 推送成功不代表 Cloudflare 已部署成功。
+- **Workers 命令行更新**（Pages 使用 Git 推送更新）：
 
 ```bash
 git pull

@@ -84,27 +84,33 @@ export class RelaySession {
         return new Response("unknown session", { status: 404 });
       }
       this.initialized = true;
-      const pair = new WebSocketPair();
-      const client = pair[0], server = pair[1];
-      server.accept();
-      this.ws = server;
       this.ctx.waitUntil(this.ctx.storage.deleteAlarm().catch(() => {}));
-      this.trace("websocket_accepted");
-      server.addEventListener("message", (event) => this.enqueueMessage(event.data));
-      server.addEventListener("close", (event) => {
-        this.trace("websocket_closed", { code: event.code, clean: event.wasClean });
-        this.shutdown("websocket_close");
-      });
-      server.addEventListener("error", () => this.shutdown("websocket_error"));
-      const protocol = request.headers.get("X-TProxy-Protocol") || "";
-      return new Response(null, { status: 101, webSocket: client,
-        headers: protocol ? { "Sec-WebSocket-Protocol": protocol } : {} });
+      return this.acceptWebSocket(request.headers.get("X-TProxy-Protocol") || "");
     }
     if (url.pathname === "/internal/close" && request.method === "POST") {
       this.shutdown("session_delete");
       return new Response(null, { status: 204 });
     }
     return new Response("not found", { status: 404 });
+  }
+
+  // Connection-local relay used by both Durable Objects and Pages.
+  acceptWebSocket(protocol) {
+    if (this.closed) return new Response("session closed", { status: 404 });
+    if (this.ws) return new Response("already connected", { status: 409 });
+    const pair = new WebSocketPair();
+    const client = pair[0], server = pair[1];
+    server.accept();
+    this.ws = server;
+    this.trace("websocket_accepted");
+    server.addEventListener("message", (event) => this.enqueueMessage(event.data));
+    server.addEventListener("close", (event) => {
+      this.trace("websocket_closed", { code: event.code, clean: event.wasClean });
+      this.shutdown("websocket_close");
+    });
+    server.addEventListener("error", () => this.shutdown("websocket_error"));
+    return new Response(null, { status: 101, webSocket: client,
+      headers: protocol ? { "Sec-WebSocket-Protocol": protocol } : {} });
   }
 
   async alarm() {

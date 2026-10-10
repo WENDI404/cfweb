@@ -1,9 +1,11 @@
-import test from "node:test";
+import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { setImmediate } from "node:timers/promises";
-import { RelaySession, LIMITS, waitFor } from "../src/session.js";
+import { RelaySession as WorkerRelaySession, LIMITS, waitFor } from "../src/session.js";
 import { FRAME, INITIAL_WINDOW, MAX_WS_MESSAGE, encodeFrame, parseFrames, u32 } from "../src/protocol.js";
 import { AesCtrStream } from "../src/mtproxy.js";
+
+import { PagesRelaySession } from "../src/pages-session.js";
 
 const SECRET = "12".repeat(16); // Synthetic test credential, never a deployment secret.
 function deferred() { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; }
@@ -15,6 +17,7 @@ async function until(check) {
   for (let i = 0; i < 100; i++) { if (check()) return; await setImmediate(); }
   assert.fail("condition did not become true");
 }
+for (const RelaySession of [WorkerRelaySession, PagesRelaySession]) describe(RelaySession.name, () => {
 function fixture(t, connect = () => { throw Error("unexpected dial"); }, Session = RelaySession) {
   const tasks = [], sent = [], stored = new Map();
   const ctx = { waitUntil(p) { tasks.push(p); }, storage: {
@@ -22,6 +25,7 @@ function fixture(t, connect = () => { throw Error("unexpected dial"); }, Session
     async get(k) { return stored.get(k); }, async delete(k) { return stored.delete(k); },
     async setAlarm() {}, async deleteAlarm() {}, async transaction(fn) { return fn(this); },
   } };
+  if (RelaySession === PagesRelaySession) Object.defineProperty(ctx, "storage", { get() { throw Error("Pages must not use DO storage"); } });
   const session = new Session(ctx, { PROXY_SECRET: SECRET }, connect);
   session.ws = { readyState: 1, send(data) { sent.push(...parseFrames(data)); }, close() {} };
   t.after(async () => { session.shutdown(); await Promise.all(tasks); });
@@ -281,8 +285,10 @@ test("stalled TCP writes time out and cleanup promises cannot leak rejections", 
 });
 test("session shutdown releases downlink waiters and deletes initialization state", async t => {
   const { session, stored } = fixture(t);
-  await session.fetch(new Request("https://session/internal/init", { method: "POST" }));
-  assert.ok(stored.has("expiresAt"));
+  if (RelaySession === WorkerRelaySession) {
+    await session.fetch(new Request("https://session/internal/init", { method: "POST" }));
+    assert.ok(stored.has("expiresAt"));
+  }
   session.openStream({ streamId: 1, payload: new Uint8Array() });
   const stream = session.streams.get(1); stream.sendCredit = 0;
   const waiting = session.waitDownlink(stream); await setImmediate(); assert.equal(session.downlinkWaiters.size, 1);
@@ -366,4 +372,6 @@ test("failed coalesced writes release the batch and close only its stream", asyn
   gate.resolve(); await until(() => !session.streams.has(1));
   assert.equal(session.uplinkItems, 0); assert.equal(session.uplinkBytes, 0);
   assert.equal(session.closed, false); assert.equal(session.streams.has(2), true);
+});
+
 });
